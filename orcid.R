@@ -9,6 +9,7 @@ x <- "07073399-4dcc-47b3-a0a8-925327224519"
 Sys.setenv(ORCID_TOKEN=x)
 
 ## Test IDs
+# orcid.id = '0000-0003-4667-6623' # Harvey
 # orcid.id = '0000-0003-1602-4544'
 # orcid.id = '0000-0001-8369-1238' # Suzanne
 # orcid.id = '0000-0003-0152-4394' # Richard
@@ -18,16 +19,18 @@ Sys.setenv(ORCID_TOKEN=x)
 # orcid.id ='0000-0001-6339-0374' # me
 # orcid.id = '0000-0002-5559-3267' # nick
 # orcid.id='0000-0001-7733-287X'
+# orcid.id = '0000-0002-5808-4249' #Jenny
 # orcid.id='0000-0001-7564-073X' # Paul
 # orcid.id='0000-0003-3637-2423' # Anisa
-# orcid.id='0000-0002-6951-7126'
+# orcid.id='0000-0002-6020-9733' # Lionel
+# orcid.id='0000-0002-0630-3825'
 
 # main function
 my.orcid = function(orcid.id='0000-0002-2358-2440'){ # default here = Ginny
   ret = list() # start with blank output
 
   # a) select person
-  bio = orcid_id(orcid = orcid.id, profile='profile') # get basics
+  bio = orcid_person(orcid = orcid.id) # get basics
   name = paste(bio[[1]]$`name`$`given-names`$value,
                bio[[1]]$`name`$`family-name`$value)
   name = gsub('  ', ' ', name) # remove double space
@@ -44,6 +47,8 @@ my.orcid = function(orcid.id='0000-0002-2358-2440'){ # default here = Ginny
     return(ret)
   }
   
+  # hide all this in a dummy function for now, as it's not used
+  use.ids = function(){
   ids = NULL
   for (k in 1:nrow(d)){
     this = d[k,]$`external-ids.external-id`[[1]]
@@ -67,6 +72,7 @@ my.orcid = function(orcid.id='0000-0002-2358-2440'){ # default here = Ginny
       ids = rbind(ids, this.frame)
     }
   }
+  } # end of dummy use.ids function
   
   #unlist(plyr::llply(d$`external-ids.external-id`, function(x){`external-id-value`}))
          
@@ -75,7 +81,25 @@ my.orcid = function(orcid.id='0000-0002-2358-2440'){ # default here = Ginny
   #  unlist(plyr::llply(aff, function(x){x$'affilname'})
   #}
   dois = identifiers(d, type='doi') # get DOIs, not available for all papers
+  dois = dois[duplicated(tolower(dois))==FALSE] # remove duplicates
   #eids = identifiers(d, type='eid') # get Scopus IDs, not available for all papers
+  
+  # remove F1000 DOIs where there is second version (keep latest version)
+  not.f1000 = dois[!str_detect(string=dois, pattern='f1000')]
+  f1000 = dois[str_detect(string=dois, pattern='f1000')]
+  if(length(f1000)>0){ # only if some F1000 journals
+    split.f1000 = str_split(f1000, pattern='\\.', n=Inf, simplify = TRUE) # split by .
+    split.f1000 = data.frame(split.f1000, stringsAsFactors = F)
+    split.f1000$X3 = as.numeric(split.f1000$X3)
+    split.f1000$X4 = as.numeric(split.f1000$X4)
+    split.f1000 = dplyr::group_by(split.f1000, X3) %>%
+      dplyr::arrange(X3, X4) %>%
+      filter(row_number()==n()) %>%
+      mutate(doi = paste(X1, '.', X2, '.', X3, '.', X4, sep=''))
+    # concatenate back F1000 and not F1000
+    dois = c(not.f1000, split.f1000$doi)
+  }
+  if(length(f1000)==0){dois = not.f1000}
   
   # d) get nicely formatted data for papers with a DOIs using crossref
   cdata.nonbibtex = cr_works(dois)$data
@@ -83,45 +107,45 @@ my.orcid = function(orcid.id='0000-0002-2358-2440'){ # default here = Ginny
   cdata.nonbibtex$OA = NA
   # run with fail
   n.match = count = 0
-  while(n.match != nrow(cdata.nonbibtex)&count<3){ # run three times max
-    OAs = purrr::map_df(cdata.nonbibtex$DOI, 
+  while(n.match != nrow(cdata.nonbibtex)&count < 3){ # run three times max
+    OAs = purrr::map_df(cdata.nonbibtex$doi, 
                 plyr::failwith(f = function(x) roadoi::oadoi_fetch(x, email = "a.barnett@qut.edu.au")))
     n.match = nrow(OAs)
     count = count + 1
     #cat(n.match, ', count', count, '\n') # tracking warning
   }
-  if(n.match != nrow(cdata.nonbibtex)){oa.warning = T}
+  if(n.match != nrow(cdata.nonbibtex)){oa.warning = TRUE}
   if(n.match == nrow(cdata.nonbibtex)){
-    oa.warning = F
-    cdata.nonbibtex$OA = OAs$is_oa 
+    oa.warning = FALSE
+    cdata.nonbibtex$OA = OAs$is_oa  # Is there an OA copy? (logical)
   }
   
   # e) format papers with separate matrix for authors ###
   papers = bib.authors = NULL
   # e2) ... now for non bibtex from crossref
   authors.crossref = NULL
-  if(nrow(cdata.nonbibtex)>0){
+  if(nrow(cdata.nonbibtex) > 0){
     authors.crossref = matrix(data='', nrow=nrow(cdata.nonbibtex), ncol=300) # start with huge matrix
     for (k in 1:nrow(cdata.nonbibtex)){ # loop needed
       # authors, convert from tibble
       fauthors = cdata.nonbibtex$author[[k]]
-      fam.only = F # flag for family only
-      if(is.null(fauthors)==F){
-        if('family' %in% names(fauthors) & length(names(fauthors))==1){
+      fam.only = FALSE # flag for family only
+      if(is.null(fauthors)==FALSE){
+        if('family' %in% names(fauthors) & length(names(fauthors))<=2){ # changed to allow 'sequence' (Sep 2018)
           fauthors = fauthors$family
-          fam.only = T
+          fam.only = TRUE
         }
       }
-      if(fam.only==F & 'given' %in% names(fauthors) == F & is.null(fauthors)==F){
-        fauthors = filter(fauthors, is.na(name)==F) # not missing
+      if(fam.only==FALSE & ('given' %in% names(fauthors) == FALSE) & is.null(fauthors)==FALSE){
+        fauthors = dplyr::filter(fauthors, is.na(name)==FALSE) # not missing
         fauthors = paste(fauthors$name)
       }
-      if(fam.only==F & 'given' %in% names(fauthors) & is.null(fauthors)==F){
-        fauthors = filter(fauthors, is.na(family)==F) # not missing
+      if(fam.only==FALSE & 'given' %in% names(fauthors) & is.null(fauthors)==FALSE){
+        fauthors = filter(fauthors, is.na(family)==FALSE) # not missing
         fauthors = select(fauthors, given, family)
         fauthors = paste(fauthors$given, fauthors$family) # does include NA - to fix
       }
-      if(is.null(fauthors)==F){
+      if(is.null(fauthors)==FALSE){
         if(length(fauthors)>ncol(authors.crossref)){fauthors = fauthors[1:ncol(authors.crossref)]} # truncate where author numbers are huge (jan 2018)
         authors.crossref[k, 1:length(fauthors)] = fauthors
       }
@@ -135,6 +159,10 @@ my.orcid = function(orcid.id='0000-0002-2358-2440'){ # default here = Ginny
       year = format(as.Date(idates), '%Y')
       ## journal
       journal = cdata.nonbibtex$container.title[k] 
+      # Identify bioRxiv (couldn't find another way, needs updating)
+      if(is.na(journal)){
+        if(cdata.nonbibtex$publisher[k] == "Cold Spring Harbor Laboratory")(journal='bioRxiv')
+      }
       # title
       title = as.character(cdata.nonbibtex$title[k])
       # volume/issue/pages
@@ -142,7 +170,7 @@ my.orcid = function(orcid.id='0000-0002-2358-2440'){ # default here = Ginny
       issue = cdata.nonbibtex$issue[k]
       pages = cdata.nonbibtex$page[k]
       # doi
-      DOI = cdata.nonbibtex$DOI[k]
+      DOI = cdata.nonbibtex$doi[k]
       # OA
       OA = cdata.nonbibtex$OA[k]
       # type
@@ -162,11 +190,13 @@ my.orcid = function(orcid.id='0000-0002-2358-2440'){ # default here = Ginny
   if(nrow(papers)==1){authors=matrix(authors); authors=t(authors)}
 
   # remove duplicates (again, just a safety net, should have been caught earlier)
-  if(nrow(papers)>1){
+  if(nrow(papers) > 1){
     dups = duplicated(tolower(papers$Title))
     papers = papers[!dups,]
     authors = authors[!dups,]
   }
+  
+  # remove later versions of paper with almost identical DOI _ TO DO
   
   ## count first author papers
   # make alternative versions of name
@@ -193,9 +223,17 @@ my.orcid = function(orcid.id='0000-0002-2358-2440'){ # default here = Ginny
   middle1  = paste(bio[[1]]$name$`given-names`$value, ' [A-Z] ', 
                   bio[[1]]$name$`family-name`$value, sep='')
   name.to.search = tolower(c(name, reverse, simple, s0, s1, s2, s3, s4, s5, s6, middle, middle1))
-  index = grep(paste(name.to.search, sep='', collapse='|'), tolower(authors[,1])) # first column of authors; NEED TO CHANGE TO APPROXIMATE MATCHING, SEE TIERNEY
+  index = grep(paste(name.to.search, sep='', collapse='|'), tolower(authors[,1])) # first column of authors
   papers$First.author = 0
   papers$First.author[index] = 1
+# last author
+  authors.na = authors
+  authors.na[authors.na==''] = NA # version with missing authors
+  last = apply(authors.na, 1, function(x) tail(na.omit(x), 1)) # extract last authors
+  index = grep(paste(name.to.search, sep='', collapse='|'), tolower(last)) # 
+  papers$Last.author = 0
+  papers$Last.author[index] = 1
+  papers$Last.author[papers$First.author == 1] = 0 # Single author papers are only flagged as first author papers
   
   # work out author order - so that it can be bolded in report
   matches = str_match(pattern=paste(name.to.search, sep='', collapse='|'), string=tolower(authors))
@@ -225,6 +263,12 @@ my.orcid = function(orcid.id='0000-0002-2358-2440'){ # default here = Ginny
   
   # replace NAs is authors with ''
   authors[is.na(authors)==T] = ''
+  
+  # give a consistent number of columns to author matrix
+  blank = matrix("", nrow=nrow(authors), ncol=50) # 50 authors max
+  if(ncol(authors)>50){authors = authors[,1:50]} # truncate at 50 if over 50 authors on a paper
+  blank[, 1:ncol(authors)] = authors
+  authors = blank
   
   # return
   ret$name = name
